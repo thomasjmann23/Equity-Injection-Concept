@@ -1,6 +1,6 @@
 # Equity Injection Concept
 
-A Streamlit web application for tracking and sourcing equity injection funds during a commercial loan closing.
+A Streamlit web application for tracking and sourcing equity injection funds.
 
 ## What It Does
 
