@@ -9,7 +9,7 @@ The app helps loan officers and closing teams verify that equity injection funds
 ## Features
 
 - Ledger to track funds used, vendors, amounts, and bank accounts
-- Document sourcing — attach invoices and bank statements to each ledger entry
+- Document sourcing: attach invoices and bank statements to each ledger entry
 - Mark items as sourced or unsourced with running totals
 - Request missing documents and draft a borrower email
 - Export a closing package as a single PDF
@@ -43,5 +43,6 @@ generate_examples.py    Script to generate demo invoices and statements
 demo_data.csv           Sample ledger data
 invoices/               Invoice image files
 statements/             Bank statement image files organized by account
+old/                    Old files, attempts
 requirements.txt        Python dependencies
 ```
