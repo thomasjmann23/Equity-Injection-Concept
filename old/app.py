@@ -256,11 +256,10 @@ def build_package_pdf() -> bytes:
 
     PAGE_W, PAGE_H = 1200, 1650
     MARGIN  = 60
-    BANNER_H = 130          # slightly taller to fit closer notes line
+    BANNER_H = 110
     BG           = (255, 255, 255)
     BANNER_BG    = (13, 110, 253)
     BANNER_FG    = (255, 255, 255)
-    NOTES_FG     = (180, 210, 255)   # lighter blue for closer notes in banner
     TEXT_C       = (33, 37, 41)
     MUTED_C      = (108, 117, 125)
     GREEN_C      = (25, 135, 84)
@@ -288,8 +287,8 @@ def build_package_pdf() -> bytes:
     y += 18
 
     # Table column widths and headers
-    CW    = [50, 220, 105, 195, 115, 120, 120, 75]
-    HEADS = ["#", "Funds Used For", "Date", "Vendor Name", "Amount", "Account#", "Invoice#", "Sourced"]
+    CW    = [220, 105, 195, 115, 120, 120, 75]
+    HEADS = ["Funds Used For", "Date", "Vendor Name", "Amount", "Account#", "Invoice#", "Sourced"]
     x = MARGIN
     for h, w in zip(HEADS, CW):
         draw.text((x, y), h.upper(), font=F["xs"], fill=MUTED_C)
@@ -301,10 +300,9 @@ def build_package_pdf() -> bytes:
     df = st.session_state.ledger
     total_amount, sourced_amount, _, _ = compute_totals()
 
-    for row_num, (_, row) in enumerate(df.iterrows(), 1):
+    for _, row in df.iterrows():
         x     = MARGIN
         cells = [
-            str(row_num),
             str(row["Funds Used For"])[:30],
             str(row["Date"]),
             str(row["Vendor Name"])[:26],
@@ -313,7 +311,7 @@ def build_package_pdf() -> bytes:
             str(row["Invoice#"]),
             "Yes" if row["Sourced"] else "No",
         ]
-        colors = [MUTED_C] + [TEXT_C] * 6 + [GREEN_C if row["Sourced"] else RED_C]
+        colors = [TEXT_C] * 6 + [GREEN_C if row["Sourced"] else RED_C]
         for cell, w, color in zip(cells, CW, colors):
             draw.text((x, y), cell, font=F["sm"], fill=color)
             x += w
@@ -324,21 +322,21 @@ def build_package_pdf() -> bytes:
     draw.line([(MARGIN, y), (PAGE_W - MARGIN, y)], fill=DIVIDER_C, width=2)
     y += 14
 
-    # Totals — shift right by the new "#" column width
-    tx = MARGIN + CW[0] + CW[1] + CW[2]
+    # Totals
+    tx = MARGIN + CW[0] + CW[1]
     draw.text((tx, y),        "Total Amount",  font=F["md"], fill=TEXT_C)
-    draw.text((tx + CW[3], y), f"${total_amount:,.2f}", font=F["md"], fill=TEXT_C)
+    draw.text((tx + CW[2], y), f"${total_amount:,.2f}", font=F["md"], fill=TEXT_C)
     y += 30
     draw.text((tx, y),        "Total Sourced", font=F["md"], fill=TEXT_C)
-    draw.text((tx + CW[3], y), f"${sourced_amount:,.2f}", font=F["md"], fill=GREEN_C)
+    draw.text((tx + CW[2], y), f"${sourced_amount:,.2f}", font=F["md"], fill=GREEN_C)
 
     pages.append(img)
 
     # ── DOCUMENT PAGES ────────────────────────────────────────────────────────
-    for row_num, (idx, row) in enumerate(df.iterrows(), 1):
+    for idx, row in df.iterrows():
         sourcing   = get_sourcing(idx)
         item_label = (
-            f"{row_num}. {row['Vendor Name']}  —  {row['Funds Used For']}"
+            f"{row['Vendor Name']}  —  {row['Funds Used For']}"
             f"   |   ${float(row['Amount']):,.2f}   |   {row['Date']}"
         )
 
@@ -346,28 +344,22 @@ def build_package_pdf() -> bytes:
         inv_name = sourcing.get("invoice_file_name")
         if inv_name:
             inv_f = find_file(all_invoices, inv_name)
-            inv_notes = sourcing.get("invoice_notes", "").strip()
-            docs.append(("Invoice", inv_f["data"] if inv_f else None, inv_notes))
+            docs.append(("Invoice", inv_f["data"] if inv_f else None))
         for j, sname in enumerate(sourcing.get("statements", []), 1):
             sf = find_file(all_statements, sname)
-            stmt_notes = (sourcing.get("statement_notes") or [""])[j-1] if j-1 < len(sourcing.get("statement_notes") or []) else ""
-            stmt_notes = stmt_notes.strip()
-            docs.append((f"Statement {j}", sf["data"] if sf else None, stmt_notes))
+            docs.append((f"Statement {j}", sf["data"] if sf else None))
 
         if not docs:
-            docs = [("No Documents Attached", None, "")]
+            docs = [("No Documents Attached", None)]
 
-        for doc_type, doc_data, closer_notes in docs:
+        for doc_type, doc_data in docs:
             pg   = Image.new("RGB", (PAGE_W, PAGE_H), BG)
             draw = ImageDraw.Draw(pg)
 
             # Banner
             draw.rectangle([(0, 0), (PAGE_W, BANNER_H)], fill=BANNER_BG)
-            draw.text((MARGIN, 14),  item_label[:95], font=F["sm"], fill=BANNER_FG)
-            draw.text((MARGIN, 44),  doc_type,        font=F["lg"], fill=BANNER_FG)
-            # Closer notes beneath doc_type title
-            if closer_notes:
-                draw.text((MARGIN, 82), closer_notes[:120], font=F["sm"], fill=NOTES_FG)
+            draw.text((MARGIN, 16),  item_label[:95], font=F["sm"], fill=BANNER_FG)
+            draw.text((MARGIN, 48),  doc_type,        font=F["lg"], fill=BANNER_FG)
 
             # Document body
             if doc_data:
@@ -472,16 +464,10 @@ def get_sourcing(idx: int) -> dict:
     if idx not in st.session_state.sourcing:
         st.session_state.sourcing[idx] = {
             "invoice_file_name": None,
-            "invoice_notes":     "",
             "statements":        [],
-            "statement_notes":   [],   # list of notes, one per statement
             "requests":          [],
         }
-    # Back-fill keys for older session state entries
-    s = st.session_state.sourcing[idx]
-    s.setdefault("invoice_notes", "")
-    s.setdefault("statement_notes", [])
-    return s
+    return st.session_state.sourcing[idx]
 
 def acct_label(acct: str) -> str:
     if acct == "uploaded":
@@ -607,9 +593,8 @@ with tab1:
     st.markdown("### Ledger")
 
     ledger = st.session_state.ledger
-    # Added "#" column at the start
-    CW    = [0.3, 2.5, 1.4, 2, 1.2, 1.4, 1.4, 0.8, 0.4]
-    HEADS = ["#", "Funds Used For", "Date", "Vendor Name", "Amount ($)",
+    CW    = [2.5, 1.4, 2, 1.2, 1.4, 1.4, 0.8, 0.4]
+    HEADS = ["Funds Used For", "Date", "Vendor Name", "Amount ($)",
              "Bank Account#", "Invoice#", "Fully Sourced", ""]
 
     hcols = st.columns(CW)
@@ -620,19 +605,18 @@ with tab1:
     if ledger.empty:
         st.markdown("*No entries yet.*")
     else:
-        for row_num, (idx, row) in enumerate(ledger.iterrows(), 1):
+        for idx, row in ledger.iterrows():
             rc = st.columns(CW)
-            rc[0].markdown(f'<div class="ledger-row" style="color:#6c757d">{row_num}</div>', unsafe_allow_html=True)
-            rc[1].markdown(f'<div class="ledger-row">{row["Funds Used For"]}</div>', unsafe_allow_html=True)
-            rc[2].markdown(f'<div class="ledger-row">{row["Date"]}</div>', unsafe_allow_html=True)
-            rc[3].markdown(f'<div class="ledger-row">{row["Vendor Name"]}</div>', unsafe_allow_html=True)
-            rc[4].markdown(f'<div class="ledger-row">${float(row["Amount"]):,.2f}</div>', unsafe_allow_html=True)
-            rc[5].markdown(f'<div class="ledger-row">{row["Bank Account#"]}</div>', unsafe_allow_html=True)
-            rc[6].markdown(f'<div class="ledger-row">{row["Invoice#"]}</div>', unsafe_allow_html=True)
+            rc[0].markdown(f'<div class="ledger-row">{row["Funds Used For"]}</div>', unsafe_allow_html=True)
+            rc[1].markdown(f'<div class="ledger-row">{row["Date"]}</div>', unsafe_allow_html=True)
+            rc[2].markdown(f'<div class="ledger-row">{row["Vendor Name"]}</div>', unsafe_allow_html=True)
+            rc[3].markdown(f'<div class="ledger-row">${float(row["Amount"]):,.2f}</div>', unsafe_allow_html=True)
+            rc[4].markdown(f'<div class="ledger-row">{row["Bank Account#"]}</div>', unsafe_allow_html=True)
+            rc[5].markdown(f'<div class="ledger-row">{row["Invoice#"]}</div>', unsafe_allow_html=True)
             sc = "sourced-yes" if row["Sourced"] else "sourced-no"
             sl = "Yes" if row["Sourced"] else "No"
-            rc[7].markdown(f'<div class="ledger-row {sc}">{sl}</div>', unsafe_allow_html=True)
-            if rc[8].button("x", key=f"del_{idx}", help="Delete entry"):
+            rc[6].markdown(f'<div class="ledger-row {sc}">{sl}</div>', unsafe_allow_html=True)
+            if rc[7].button("x", key=f"del_{idx}", help="Delete entry"):
                 to_del.append(idx)
 
     if to_del:
@@ -641,11 +625,11 @@ with tab1:
 
     st.markdown("<br>", unsafe_allow_html=True)
     tc = st.columns(CW)
-    tc[3].markdown('<div class="total-row">Total Amount</div>', unsafe_allow_html=True)
-    tc[4].markdown(f'<div class="total-row">${total_amount:,.2f}</div>', unsafe_allow_html=True)
+    tc[2].markdown('<div class="total-row">Total Amount</div>', unsafe_allow_html=True)
+    tc[3].markdown(f'<div class="total-row">${total_amount:,.2f}</div>', unsafe_allow_html=True)
     sc2 = st.columns(CW)
-    sc2[3].markdown('<div class="total-row">Total Sourced</div>', unsafe_allow_html=True)
-    sc2[4].markdown(f'<div class="total-row" style="color:#198754">${sourced_amount:,.2f}</div>',
+    sc2[2].markdown('<div class="total-row">Total Sourced</div>', unsafe_allow_html=True)
+    sc2[3].markdown(f'<div class="total-row" style="color:#198754">${sourced_amount:,.2f}</div>',
                     unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -686,10 +670,9 @@ with tab1:
     if st.session_state.ledger.empty:
         st.markdown("*No ledger entries to source.*")
     else:
-        for row_num, (idx, row) in enumerate(st.session_state.ledger.iterrows(), 1):
+        for idx, row in st.session_state.ledger.iterrows():
             sourcing = get_sourcing(idx)
-            # Number prefix in the expander label
-            label    = f"{row_num}. {row['Vendor Name']}  —  {row['Funds Used For']}  |  ${float(row['Amount']):,.2f}"
+            label    = f"{row['Vendor Name']}  —  {row['Funds Used For']}  |  ${float(row['Amount']):,.2f}"
 
             with st.expander(label, expanded=(idx == 0)):
 
@@ -732,22 +715,9 @@ with tab1:
                         "inv_status", STATUS_OPTIONS,
                         key=f"inv_status_{idx}", label_visibility="collapsed"
                     )
-                    # Closer notes text box for invoice
-                    inv_notes_val = st.text_area(
-                        "Closer Notes",
-                        value=sourcing.get("invoice_notes", ""),
-                        key=f"inv_notes_{idx}",
-                        placeholder="Add closer notes for this invoice...",
-                        height=80,
-                    )
-                    sourcing["invoice_notes"] = inv_notes_val
 
                 # Statement cards — cols 1..n_stmts
                 stmts_to_remove = []
-                # Ensure statement_notes list is long enough
-                while len(sourcing["statement_notes"]) < len(sourcing["statements"]):
-                    sourcing["statement_notes"].append("")
-
                 for j, sname in enumerate(sourcing["statements"]):
                     if j + 1 >= MAX_DOC_COLS:
                         break
@@ -765,26 +735,12 @@ with tab1:
                             f"stmt_status_{j}", STATUS_OPTIONS,
                             key=f"stmt_status_{idx}_{j}", label_visibility="collapsed"
                         )
-                        # Closer notes text box for this statement
-                        stmt_notes_val = st.text_area(
-                            "Closer Notes",
-                            value=sourcing["statement_notes"][j],
-                            key=f"stmt_notes_{idx}_{j}",
-                            placeholder=f"Add closer notes for Statement {j+1}...",
-                            height=80,
-                        )
-                        sourcing["statement_notes"][j] = stmt_notes_val
-
                         if st.button("Remove", key=f"rm_{idx}_{j}"):
                             stmts_to_remove.append(j)
 
                 if stmts_to_remove:
                     sourcing["statements"] = [
                         s for i, s in enumerate(sourcing["statements"])
-                        if i not in stmts_to_remove
-                    ]
-                    sourcing["statement_notes"] = [
-                        n for i, n in enumerate(sourcing["statement_notes"])
                         if i not in stmts_to_remove
                     ]
                     st.rerun()
@@ -822,7 +778,6 @@ with tab1:
                                 }
                                 st.session_state.user_statements.append(new_fd)
                                 sourcing["statements"].append(up_new_stmt.name)
-                                sourcing["statement_notes"].append("")
                                 st.rerun()
 
                         # Select from existing loaded statements / other docs
@@ -849,7 +804,6 @@ with tab1:
                                     if sel_stmt != "— Select Statement —":
                                         if st.button("Add", key=f"add_stmt_{idx}", type="primary"):
                                             sourcing["statements"].append(sel_stmt)
-                                            sourcing["statement_notes"].append("")
                                             for _k in [f"acct_sel_{idx}", f"stmt_sel_{idx}"]:
                                                 st.session_state.pop(_k, None)
                                             st.rerun()
