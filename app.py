@@ -9,7 +9,7 @@ st.set_page_config(page_title="Closing Equity Injection", layout="wide")
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Loan info — plain text, no card */
+    /* Loan info - plain text, no card */
     .loan-label {
         font-size: 0.72rem;
         color: #6c757d;
@@ -119,7 +119,7 @@ st.markdown("""
         background: #fffdf0;
         margin-bottom: 8px;
     }
-    /* Add Statement upload zone — styled to look like the add card */
+    /* Add Statement upload zone - styled to look like the add card */
     div[data-testid="stExpander"] [data-testid="stFileUploaderDropzone"] {
         min-height: 160px;
         border: 2px dashed #0d6efd !important;
@@ -131,7 +131,7 @@ st.markdown("""
         color: #0d6efd !important;
         font-weight: 600 !important;
     }
-    /* Green expander for sourced items — targets expander containing the marker */
+    /* Green expander for sourced items - targets expander containing the marker */
     div[data-testid="stExpander"]:has(.sourced-item-marker) details {
         background-color: #f0fff4 !important;
         border-color: #198754 !important;
@@ -139,6 +139,16 @@ st.markdown("""
     div[data-testid="stExpander"]:has(.sourced-item-marker) summary p,
     div[data-testid="stExpander"]:has(.sourced-item-marker) summary span {
         color: #198754 !important;
+        font-weight: 600 !important;
+    }
+    /* Yellow expander for items with outstanding document requests */
+    div[data-testid="stExpander"]:has(.request-outstanding-marker) details {
+        background-color: #fffdf0 !important;
+        border-color: #ffc107 !important;
+    }
+    div[data-testid="stExpander"]:has(.request-outstanding-marker) summary p,
+    div[data-testid="stExpander"]:has(.request-outstanding-marker) summary span {
+        color: #856404 !important;
         font-weight: 600 !important;
     }
 </style>
@@ -151,6 +161,7 @@ EQUITY_REQUIRED = 100_000.00
 
 STATUS_OPTIONS = ["Pending", "Approved", "Rejected"]
 MAX_DOC_COLS   = 5
+UOP_ITEMS      = ["Working Capital", "Leasehold Improvements", "FF&E", "M&E", "Closing Costs"]
 
 # ── FILE HELPERS ──────────────────────────────────────────────────────────────
 def parse_month(fname: str) -> str:
@@ -250,7 +261,53 @@ def _load_pkg_fonts():
         "xs":    _try(12),
     }
 
-def build_package_pdf() -> bytes:
+def apply_watermark(img, text: str = "DRAFT - FOR REVIEW ONLY") -> "Image":
+    from PIL import Image, ImageDraw, ImageFont
+    import math
+
+    F = _load_pkg_fonts()
+    PAGE_W, PAGE_H = img.size
+
+    # Create transparent RGBA overlay the same size as the page
+    overlay = Image.new("RGBA", (PAGE_W, PAGE_H), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+
+    # Render watermark text onto a temporary wide canvas, then rotate
+    wm_font = F["title"]
+    try:
+        bbox = od.textbbox((0, 0), text, font=wm_font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+    except Exception:
+        tw, th = 700, 40
+
+    # Build a temp canvas sized to the text, draw text, rotate 45°
+    tmp = Image.new("RGBA", (tw + 40, th + 20), (0, 0, 0, 0))
+    td  = ImageDraw.Draw(tmp)
+    td.text((20, 10), text, font=wm_font, fill=(180, 0, 0, 90))
+    rotated = tmp.rotate(45, expand=True)
+
+    # Tile the rotated stamp across the page with spacing
+    rw, rh = rotated.size
+    x_step = int(rw * 1.1)
+    y_step = int(rh * 1.1)
+    x_start = -rw
+    y_start = -rh
+    x = x_start
+    while x < PAGE_W + rw:
+        y = y_start
+        while y < PAGE_H + rh:
+            overlay.paste(rotated, (x, y), rotated)
+            y += y_step
+        x += x_step
+
+    # Composite overlay onto a copy of the original page
+    base = img.convert("RGBA")
+    combined = Image.alpha_composite(base, overlay)
+    return combined.convert("RGB")
+
+
+def build_package_pdf(watermark: bool = False) -> bytes:
     from PIL import Image, ImageDraw
     import io as _io
 
@@ -324,7 +381,7 @@ def build_package_pdf() -> bytes:
     draw.line([(MARGIN, y), (PAGE_W - MARGIN, y)], fill=DIVIDER_C, width=2)
     y += 14
 
-    # Totals — shift right by the new "#" column width
+    # Totals - shift right by the new "#" column width
     tx = MARGIN + CW[0] + CW[1] + CW[2]
     draw.text((tx, y),        "Total Amount",  font=F["md"], fill=TEXT_C)
     draw.text((tx + CW[3], y), f"${total_amount:,.2f}", font=F["md"], fill=TEXT_C)
@@ -332,13 +389,72 @@ def build_package_pdf() -> bytes:
     draw.text((tx, y),        "Total Sourced", font=F["md"], fill=TEXT_C)
     draw.text((tx + CW[3], y), f"${sourced_amount:,.2f}", font=F["md"], fill=GREEN_C)
 
-    pages.append(img)
+    pages.append(apply_watermark(img) if watermark else img)
 
-    # ── DOCUMENT PAGES ────────────────────────────────────────────────────────
+    # ── PAGE 2: UOP ROLL-UP ───────────────────────────────────────────────────
+    img2  = Image.new("RGB", (PAGE_W, PAGE_H), BG)
+    draw2 = ImageDraw.Draw(img2)
+    y2 = MARGIN
+
+    draw2.text((MARGIN, y2), "Use of Proceeds Roll-up", font=F["title"], fill=TEXT_C)
+    y2 += 42
+    draw2.text((MARGIN, y2), f"Loan: {LOAN_NAME}   |   Equity Required: ${EQUITY_REQUIRED:,.0f}",
+               font=F["xs"], fill=MUTED_C)
+    y2 += 28
+    draw2.line([(MARGIN, y2), (PAGE_W - MARGIN, y2)], fill=DIVIDER_C, width=2)
+    y2 += 18
+
+    RCW2   = [50, 240, 160, 160, 200, 130]
+    RHEAD2 = ["#", "UOP Item", "Total Sourced", "EI Outstanding", "Total EI Available", "Fully Sourced"]
+    rx = MARGIN
+    for h, w in zip(RHEAD2, RCW2):
+        draw2.text((rx, y2), h.upper(), font=F["xs"], fill=MUTED_C)
+        rx += w
+    y2 += 20
+    draw2.line([(MARGIN, y2), (PAGE_W - MARGIN, y2)], fill=DIVIDER_C, width=1)
+    y2 += 10
+
+    uop_df = st.session_state.ledger
+    assigned2 = uop_df[uop_df.get("UOP Item", pd.Series(dtype=str)).isin(UOP_ITEMS)] if "UOP Item" in uop_df.columns else pd.DataFrame()
+    rollup2 = []
+    for uop_item in UOP_ITEMS:
+        grp = assigned2[assigned2["UOP Item"] == uop_item] if not assigned2.empty else pd.DataFrame()
+        if grp.empty:
+            continue
+        ts = grp.loc[grp["Sourced"], "Amount"].sum()
+        ta = grp["Amount"].sum()
+        ei_out = ta - ts
+        rollup2.append((uop_item, ts, ei_out, ta, "Yes" if ei_out <= 0 else "No"))
+
+    for r_num, (uop_item, ts, ei_out, ei_avail, fs) in enumerate(rollup2, 1):
+        rx = MARGIN
+        cells2 = [str(r_num), uop_item, f"${ts:,.2f}", f"${ei_out:,.2f}", f"${ei_avail:,.2f}", fs]
+        colors2 = [MUTED_C, TEXT_C, GREEN_C, RED_C if ei_out > 0 else GREEN_C, TEXT_C,
+                   GREEN_C if fs == "Yes" else RED_C]
+        for cell, w, color in zip(cells2, RCW2, colors2):
+            draw2.text((rx, y2), cell, font=F["sm"], fill=color)
+            rx += w
+        y2 += 26
+        draw2.line([(MARGIN, y2 - 5), (PAGE_W - MARGIN, y2 - 5)], fill=(240, 240, 240), width=1)
+
+    y2 += 8
+    draw2.line([(MARGIN, y2), (PAGE_W - MARGIN, y2)], fill=DIVIDER_C, width=2)
+    y2 += 14
+    # Totals
+    tx2 = MARGIN + RCW2[0]
+    draw2.text((tx2, y2), "Totals", font=F["md"], fill=TEXT_C)
+    draw2.text((tx2 + RCW2[1], y2), f"${sum(r[1] for r in rollup2):,.2f}", font=F["md"], fill=GREEN_C)
+    ei_tot2 = sum(r[2] for r in rollup2)
+    draw2.text((tx2 + RCW2[1] + RCW2[2], y2), f"${ei_tot2:,.2f}",
+               font=F["md"], fill=GREEN_C if ei_tot2 <= 0 else RED_C)
+    draw2.text((tx2 + RCW2[1] + RCW2[2] + RCW2[3], y2), f"${sum(r[3] for r in rollup2):,.2f}",
+               font=F["md"], fill=TEXT_C)
+
+    pages.append(apply_watermark(img2) if watermark else img2)
     for row_num, (idx, row) in enumerate(df.iterrows(), 1):
         sourcing   = get_sourcing(idx)
         item_label = (
-            f"{row_num}. {row['Vendor Name']}  —  {row['Funds Used For']}"
+            f"{row_num}. {row['Vendor Name']}  -  {row['Funds Used For']}"
             f"   |   ${float(row['Amount']):,.2f}   |   {row['Date']}"
         )
 
@@ -387,7 +503,7 @@ def build_package_pdf() -> bytes:
                           "No document file available for this item.",
                           font=F["md"], fill=MUTED_C)
 
-            pages.append(pg)
+            pages.append(apply_watermark(pg) if watermark else pg)
 
     buf = _io.BytesIO()
     pages[0].save(buf, format="PDF", save_all=True, append_images=pages[1:])
@@ -427,10 +543,12 @@ def load_ledger():
         df["Date"]          = df["Date"].astype(str)
         df["Bank Account#"] = df["Bank Account#"].astype(str)
         df["Invoice#"]      = df["Invoice#"].fillna("").astype(str)
+        if "UOP Item" not in df.columns:
+            df["UOP Item"] = ""
         return df
     except FileNotFoundError:
         return pd.DataFrame(columns=["Funds Used For", "Date", "Vendor Name",
-                                     "Amount", "Bank Account#", "Invoice#", "Sourced"])
+                                     "Amount", "Bank Account#", "Invoice#", "Sourced", "UOP Item"])
 
 for _k, _v in [
     ("ledger",            None),
@@ -443,6 +561,7 @@ for _k, _v in [
     ("thumbnails",        {}),
     ("show_add_form",     False),
     ("initial_state_set", False),
+    ("package_approved",  False),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -519,12 +638,12 @@ st.markdown("---")
 tab1, tab2, tab3 = st.tabs(["Equity Injection", "Statements", "Other Documents"])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — EQUITY INJECTION
+# TAB 1 - EQUITY INJECTION
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     total_amount, sourced_amount, unsourced_amount, equity_remaining = compute_totals()
 
-    # ── LOAN INFO — plain text, same column layout ────────────────────────────
+    # ── LOAN INFO - plain text, same column layout ────────────────────────────
     c1, c2, c3, c4, c5, c6 = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1.5])
 
     c1.markdown(f"""<div>
@@ -607,10 +726,10 @@ with tab1:
     st.markdown("### Ledger")
 
     ledger = st.session_state.ledger
-    # Added "#" column at the start
-    CW    = [0.3, 2.5, 1.4, 2, 1.2, 1.4, 1.4, 0.8, 0.4]
+    # Added "#" column at the start, UOP Item at end
+    CW    = [0.3, 2.0, 1.3, 1.8, 1.1, 1.3, 1.3, 0.8, 1.5, 0.4]
     HEADS = ["#", "Funds Used For", "Date", "Vendor Name", "Amount ($)",
-             "Bank Account#", "Invoice#", "Fully Sourced", ""]
+             "Bank Account#", "Invoice#", "Fully Sourced", "UOP Item", ""]
 
     hcols = st.columns(CW)
     for col, lbl in zip(hcols, HEADS):
@@ -632,7 +751,19 @@ with tab1:
             sc = "sourced-yes" if row["Sourced"] else "sourced-no"
             sl = "Yes" if row["Sourced"] else "No"
             rc[7].markdown(f'<div class="ledger-row {sc}">{sl}</div>', unsafe_allow_html=True)
-            if rc[8].button("x", key=f"del_{idx}", help="Delete entry"):
+            # UOP Item dropdown inline in ledger
+            cur_uop = row.get("UOP Item", "") if "UOP Item" in row.index else ""
+            uop_opts = ["- Select -"] + UOP_ITEMS
+            uop_default = uop_opts.index(cur_uop) if cur_uop in uop_opts else 0
+            new_uop = rc[8].selectbox(
+                "uop", uop_opts, index=uop_default,
+                key=f"uop_{idx}", label_visibility="collapsed"
+            )
+            if new_uop != "- Select -":
+                st.session_state.ledger.at[idx, "UOP Item"] = new_uop
+            elif "UOP Item" not in st.session_state.ledger.columns or st.session_state.ledger.at[idx, "UOP Item"] not in UOP_ITEMS:
+                st.session_state.ledger.at[idx, "UOP Item"] = ""
+            if rc[9].button("x", key=f"del_{idx}", help="Delete entry"):
                 to_del.append(idx)
 
     if to_del:
@@ -647,6 +778,12 @@ with tab1:
     sc2[3].markdown('<div class="total-row">Total Sourced</div>', unsafe_allow_html=True)
     sc2[4].markdown(f'<div class="total-row" style="color:#198754">${sourced_amount:,.2f}</div>',
                     unsafe_allow_html=True)
+    ei_closing = max(0.0, EQUITY_REQUIRED - sourced_amount)
+    ei_closing_color = "#dc3545" if ei_closing > 0 else "#198754"
+    ec = st.columns(CW)
+    ec[3].markdown('<div class="total-row">Additional EI Required to Close</div>', unsafe_allow_html=True)
+    ec[4].markdown(f'<div class="total-row" style="color:{ei_closing_color}">${ei_closing:,.2f}</div>',
+                   unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("+ Add Entry", type="secondary"):
@@ -655,7 +792,7 @@ with tab1:
     if st.session_state.show_add_form:
         with st.form("add_entry_form", clear_on_submit=True):
             st.markdown("**New Ledger Entry**")
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([2.5, 1.4, 2, 1.2, 1.4, 1.4, 0.8])
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([2.5, 1.4, 2, 1.2, 1.4, 1.4, 0.8, 1.5])
             nf = c1.text_input("Funds Used For*")
             nd = c2.date_input("Date", value=date.today())
             nv = c3.text_input("Vendor Name*")
@@ -663,6 +800,7 @@ with tab1:
             nb = c5.text_input("Bank Account#")
             ni = c6.text_input("Invoice#")
             ns = c7.checkbox("Sourced")
+            nu = c8.selectbox("UOP Item", ["- Select -"] + UOP_ITEMS)
             if st.form_submit_button("Add Entry", type="primary"):
                 if not nf or not nv:
                     st.error("Funds Used For and Vendor Name are required.")
@@ -671,10 +809,77 @@ with tab1:
                         st.session_state.ledger,
                         pd.DataFrame([{"Funds Used For": nf, "Date": str(nd),
                                        "Vendor Name": nv, "Amount": na,
-                                       "Bank Account#": nb, "Invoice#": ni, "Sourced": ns}])
+                                       "Bank Account#": nb, "Invoice#": ni, "Sourced": ns,
+                                       "UOP Item": nu if nu != "- Select -" else ""}])
                     ], ignore_index=True)
                     st.session_state.show_add_form = False
                     st.rerun()
+
+    st.markdown("---")
+
+    # ── UOP ROLL-UP ───────────────────────────────────────────────────────────
+    st.markdown("### Use of Proceeds Roll-up")
+
+    df_uop = st.session_state.ledger
+    if df_uop.empty or "UOP Item" not in df_uop.columns:
+        st.markdown("*Assign UOP Items in the ledger above to see the roll-up.*")
+    else:
+        assigned = df_uop[df_uop["UOP Item"].isin(UOP_ITEMS)]
+        if assigned.empty:
+            st.markdown("*Assign UOP Items in the ledger above to see the roll-up.*")
+        else:
+            # Build roll-up grouped by UOP Item (preserve order of UOP_ITEMS)
+            rollup_rows = []
+            for uop_item in UOP_ITEMS:
+                grp = assigned[assigned["UOP Item"] == uop_item]
+                if grp.empty:
+                    continue
+                total_sourced = grp.loc[grp["Sourced"], "Amount"].sum()
+                total_amount  = grp["Amount"].sum()
+                ei_outstanding = total_amount - total_sourced
+                total_ei_avail = EQUITY_REQUIRED  # same pool for all items
+                fully_sourced  = "Yes" if ei_outstanding <= 0 else "No"
+                rollup_rows.append({
+                    "UOP Item":           uop_item,
+                    "Total Sourced":      total_sourced,
+                    "EI Outstanding":     ei_outstanding,
+                    "Total EI Available": total_amount,
+                    "Fully Sourced":      fully_sourced,
+                })
+
+            RCW   = [0.3, 2.0, 1.5, 1.5, 1.8, 1.2]
+            RHEADS = ["#", "UOP Item", "Total Sourced", "EI Outstanding",
+                      "Total EI Available", "Fully Sourced"]
+            rhcols = st.columns(RCW)
+            for col, lbl in zip(rhcols, RHEADS):
+                col.markdown(f'<div class="ledger-header">{lbl}</div>', unsafe_allow_html=True)
+
+            for r_num, rrow in enumerate(rollup_rows, 1):
+                rrc = st.columns(RCW)
+                rrc[0].markdown(f'<div class="ledger-row" style="color:#6c757d">{r_num}</div>', unsafe_allow_html=True)
+                rrc[1].markdown(f'<div class="ledger-row">{rrow["UOP Item"]}</div>', unsafe_allow_html=True)
+                rrc[2].markdown(f'<div class="ledger-row" style="color:#198754">${rrow["Total Sourced"]:,.2f}</div>', unsafe_allow_html=True)
+                ei_color = "#dc3545" if rrow["EI Outstanding"] > 0 else "#198754"
+                rrc[3].markdown(f'<div class="ledger-row" style="color:{ei_color}">${rrow["EI Outstanding"]:,.2f}</div>', unsafe_allow_html=True)
+                rrc[4].markdown(f'<div class="ledger-row">${rrow["Total EI Available"]:,.2f}</div>', unsafe_allow_html=True)
+                fs_c = "sourced-yes" if rrow["Fully Sourced"] == "Yes" else "sourced-no"
+                rrc[5].markdown(f'<div class="ledger-row {fs_c}">{rrow["Fully Sourced"]}</div>', unsafe_allow_html=True)
+
+            # Totals row
+            st.markdown("<br>", unsafe_allow_html=True)
+            rtc = st.columns(RCW)
+            rtc[1].markdown('<div class="total-row">Totals</div>', unsafe_allow_html=True)
+            rtc[2].markdown(f'<div class="total-row" style="color:#198754">${sum(r["Total Sourced"] for r in rollup_rows):,.2f}</div>', unsafe_allow_html=True)
+            ei_tot = sum(r["EI Outstanding"] for r in rollup_rows)
+            ei_tot_color = "#dc3545" if ei_tot > 0 else "#198754"
+            rtc[3].markdown(f'<div class="total-row" style="color:{ei_tot_color}">${ei_tot:,.2f}</div>', unsafe_allow_html=True)
+            rtc[4].markdown(f'<div class="total-row">${sum(r["Total EI Available"] for r in rollup_rows):,.2f}</div>', unsafe_allow_html=True)
+            uop_sourced_total = sum(r["Total Sourced"] for r in rollup_rows)
+            uop_ei_closing = max(0.0, EQUITY_REQUIRED - uop_sourced_total)
+            uop_ei_closing_color = "#dc3545" if uop_ei_closing > 0 else "#198754"
+            rec = st.columns(RCW)
+            rec[1].markdown('<div class="total-row">Additional EI Required to Close</div>', unsafe_allow_html=True)
+            rec[2].markdown(f'<div class="total-row" style="color:{uop_ei_closing_color}">${uop_ei_closing:,.2f}</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -689,7 +894,7 @@ with tab1:
         for row_num, (idx, row) in enumerate(st.session_state.ledger.iterrows(), 1):
             sourcing = get_sourcing(idx)
             # Number prefix in the expander label
-            label    = f"{row_num}. {row['Vendor Name']}  —  {row['Funds Used For']}  |  ${float(row['Amount']):,.2f}"
+            label    = f"{row_num}. {row['Vendor Name']}  -  {row['Funds Used For']}  |  ${float(row['Amount']):,.2f}"
 
             with st.expander(label, expanded=(idx == 0)):
 
@@ -699,20 +904,26 @@ with tab1:
                         '<div class="sourced-item-marker" style="display:none"></div>',
                         unsafe_allow_html=True
                     )
+                # Inject hidden marker for yellow highlight when requests are outstanding
+                if sourcing.get("requests"):
+                    st.markdown(
+                        '<div class="request-outstanding-marker" style="display:none"></div>',
+                        unsafe_allow_html=True
+                    )
 
                 # ── DOCUMENT CARD ROW ─────────────────────────────────────────
                 n_stmts  = len(sourcing["statements"])
                 doc_cols = st.columns(MAX_DOC_COLS)
 
-                # Invoice card — col 0
+                # Invoice card - col 0
                 with doc_cols[0]:
                     st.markdown(col_label("Invoice / Receipt"), unsafe_allow_html=True)
-                    inv_opts = ["— Select invoice —"] + inv_names
+                    inv_opts = ["- Select invoice -"] + inv_names
                     sel_inv  = st.selectbox(
                         "inv", inv_opts, key=f"inv_sel_{idx}",
                         label_visibility="collapsed"
                     )
-                    if sel_inv != "— Select invoice —":
+                    if sel_inv != "- Select invoice -":
                         sourcing["invoice_file_name"] = sel_inv
                         inv_f = find_file(all_invoices, sel_inv)
                         st.markdown(
@@ -742,7 +953,7 @@ with tab1:
                     )
                     sourcing["invoice_notes"] = inv_notes_val
 
-                # Statement cards — cols 1..n_stmts
+                # Statement cards - cols 1..n_stmts
                 stmts_to_remove = []
                 # Ensure statement_notes list is long enough
                 while len(sourcing["statement_notes"]) < len(sourcing["statements"]):
@@ -789,7 +1000,7 @@ with tab1:
                     ]
                     st.rerun()
 
-                # Add Statement card — next available col
+                # Add Statement card - next available col
                 add_col_idx = n_stmts + 1
                 if add_col_idx < MAX_DOC_COLS:
                     with doc_cols[add_col_idx]:
@@ -804,7 +1015,7 @@ with tab1:
                             if v or k == "other_docs"
                         }
 
-                        # Upload zone — styled via CSS to look like doc-card-add
+                        # Upload zone - styled via CSS to look like doc-card-add
                         up_new_stmt = st.file_uploader(
                             "upload_stmt", type=["pdf", "png", "jpg", "jpeg"],
                             key=f"stmt_upload_{idx}", label_visibility="collapsed"
@@ -827,26 +1038,26 @@ with tab1:
 
                         # Select from existing loaded statements / other docs
                         if avail_accts:
-                            acct_opts = ["— Select Account —"] + list(avail_accts.keys())
+                            acct_opts = ["- Select Account -"] + list(avail_accts.keys())
                             sel_acct  = st.selectbox(
                                 "acct_sel", acct_opts,
                                 key=f"acct_sel_{idx}",
                                 label_visibility="collapsed",
-                                format_func=lambda x: acct_label(x) if x != "— Select Account —" else x
+                                format_func=lambda x: acct_label(x) if x != "- Select Account -" else x
                             )
-                            if sel_acct != "— Select Account —":
+                            if sel_acct != "- Select Account -":
                                 avail_stmts = [f["name"] for f in avail_accts[sel_acct]]
                                 if not avail_stmts:
                                     st.caption("No other documents yet. Upload one above.")
                                 else:
                                     sel_stmt = st.selectbox(
-                                        "stmt_sel", ["— Select Statement —"] + avail_stmts,
+                                        "stmt_sel", ["- Select Statement -"] + avail_stmts,
                                         key=f"stmt_sel_{idx}",
                                         label_visibility="collapsed",
                                         format_func=lambda x: parse_month(x)
-                                        if x != "— Select Statement —" else x
+                                        if x != "- Select Statement -" else x
                                     )
-                                    if sel_stmt != "— Select Statement —":
+                                    if sel_stmt != "- Select Statement -":
                                         if st.button("Add", key=f"add_stmt_{idx}", type="primary"):
                                             sourcing["statements"].append(sel_stmt)
                                             sourcing["statement_notes"].append("")
@@ -878,7 +1089,7 @@ with tab1:
                                  use_container_width=True):
                         st.session_state[show_key] = not st.session_state.get(show_key, False)
 
-                # Request form — full width below
+                # Request form - full width below
                 if st.session_state.get(show_key, False):
                     with st.form(f"req_form_{idx}", clear_on_submit=True):
                         desc = st.text_area(
@@ -889,7 +1100,7 @@ with tab1:
                         if st.form_submit_button("Add Request"):
                             if desc.strip():
                                 sourcing["requests"].append({
-                                    "item":        f"{row['Vendor Name']} — {row['Funds Used For']}",
+                                    "item":        f"{row['Vendor Name']} - {row['Funds Used For']}",
                                     "description": desc.strip(),
                                 })
                                 st.session_state[show_key] = False
@@ -928,50 +1139,83 @@ with tab1:
                 <div style="font-size:0.9rem;color:#212529">{r['description']}</div>
             </div>""", unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Compose Email to Borrower"):
-            st.session_state["show_email"] = not st.session_state.get("show_email", False)
-
-        if st.session_state.get("show_email", False):
-            lines = [
-                f"Subject: Outstanding Document Requests — {LOAN_NAME}", "",
-                "Dear Borrower,", "",
-                "Please provide the following documents at your earliest convenience:", "",
-            ]
-            for i, r in enumerate(all_reqs, 1):
-                lines += [f"{i}. {r['item']}", f"   {r['description']}", ""]
-            lines += ["Please reach out with any questions.", "", "Thank you,"]
-            st.text_area("Email Draft", value="\n".join(lines), height=280, key="email_draft")
-            st.caption("Copy the text above and paste into your email client.")
-
     st.markdown("---")
 
     # ── EXPORT PACKAGE ────────────────────────────────────────────────────────
     st.markdown("### Export Package")
-    st.markdown(
-        "Generate a single PDF: Page 1 is the ledger, followed by one page per "
-        "document for each line item."
-    )
 
-    if st.button("Generate Package PDF", type="primary"):
-        with st.spinner("Building PDF..."):
-            try:
-                st.session_state["package_pdf"] = build_package_pdf()
-            except Exception as e:
-                st.error(f"Error generating PDF: {e}")
-                st.session_state.pop("package_pdf", None)
+    df_check    = st.session_state.ledger
+    all_sourced = (not df_check.empty) and bool(df_check["Sourced"].all())
 
-    if st.session_state.get("package_pdf"):
-        fname = f"closing_package_{LOAN_NAME.replace(' ', '_')}.pdf"
-        st.download_button(
-            label="Download Package PDF",
-            data=st.session_state["package_pdf"],
-            file_name=fname,
-            mime="application/pdf",
+    # ── DRAFT / REVIEW COPY (always available) + approval checkbox ────────────
+    st.markdown("#### Draft - Review Copy")
+    st.caption("Watermarked PDF for internal review.")
+
+    draft_col, approval_col = st.columns([3, 2])
+
+    with draft_col:
+        if st.button("Generate Draft PDF", type="secondary"):
+            with st.spinner("Building draft PDF..."):
+                try:
+                    st.session_state["draft_pdf"] = build_package_pdf(watermark=True)
+                except Exception as e:
+                    st.error(f"Error generating draft PDF: {e}")
+                    st.session_state.pop("draft_pdf", None)
+
+        if st.session_state.get("draft_pdf"):
+            fname_draft = f"DRAFT_closing_package_{LOAN_NAME.replace(' ', '_')}.pdf"
+            st.download_button(
+                label="Download Draft PDF",
+                data=st.session_state["draft_pdf"],
+                file_name=fname_draft,
+                mime="application/pdf",
+            )
+
+    with approval_col:
+        is_approved = st.checkbox(
+            "Approved",
+            value=st.session_state.get("package_approved", False),
+            key="approval_checkbox",
         )
+        if is_approved != st.session_state.get("package_approved", False):
+            st.session_state["package_approved"] = is_approved
+            st.session_state.pop("final_pdf", None)
+            st.rerun()
+        if is_approved:
+            st.caption("Package approved - final PDF unlocked.")
+        else:
+            st.caption("Check to approve and unlock the final PDF.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── FINAL / APPROVED COPY (requires approval checkbox + all sourced) ───────
+    st.markdown("#### Final - Approved Package")
+
+    if not is_approved:
+        st.caption("Approve the package above to unlock the final PDF.")
+    elif not all_sourced:
+        st.warning("All ledger items must be marked **Sourced** before the final package can be generated.")
+    else:
+        st.success("All items sourced and package approved - final PDF available.")
+        if st.button("Generate Final PDF", type="primary"):
+            with st.spinner("Building final PDF..."):
+                try:
+                    st.session_state["final_pdf"] = build_package_pdf(watermark=False)
+                except Exception as e:
+                    st.error(f"Error generating final PDF: {e}")
+                    st.session_state.pop("final_pdf", None)
+
+        if st.session_state.get("final_pdf"):
+            fname_final = f"FINAL_closing_package_{LOAN_NAME.replace(' ', '_')}.pdf"
+            st.download_button(
+                label="Download Final PDF",
+                data=st.session_state["final_pdf"],
+                file_name=fname_final,
+                mime="application/pdf",
+            )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — STATEMENTS
+# TAB 2 - STATEMENTS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown("### Bank / Credit Card Statements")
@@ -1018,7 +1262,7 @@ with tab2:
                                 st.image(fd["data"], use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — OTHER DOCUMENTS
+# TAB 3 - OTHER DOCUMENTS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.markdown("### Other Documents")
